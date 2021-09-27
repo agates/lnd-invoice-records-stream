@@ -2,6 +2,7 @@ import asyncio
 import base64
 import binascii
 import json
+from logging import error
 import os
 from functools import partial
 from pathlib import Path
@@ -19,6 +20,11 @@ TLV_DECODERS = {
     133773310: partial(bytes.decode, encoding="UTF-8"),
 }
 
+LND_CONNECTION_STRINGS = ["127.0.0.1", "umbrel.local"]
+
+
+class LNDNodeNotFound(Exception):
+    pass
 
 def decode_tlv_record(key: int, value: bytes):
     try:
@@ -44,13 +50,37 @@ def invoice_custom_records(invoice: ln.Invoice, custom_record_keys: Set[int] = N
         )
 
 
+async def find_lnd_node(
+    creds: grpc.ChannelCredentials, macaroon: str
+) -> lnrpc.LightningStub:
+    """First look on local host then look on list of alternates for
+    a lightning LND conneciton"""
+
+    for con_str in LND_CONNECTION_STRINGS:
+        async with grpc.aio.secure_channel(f"{con_str}:10009", creds) as channel:
+            stub = lnrpc.LightningStub(channel)
+            request = ln.GetInfoRequest()
+            try:
+                get_info = await stub.GetInfo(
+                    request=request, metadata=[("macaroon", macaroon)]
+                )
+                print(f"Successful connection to: {con_str}")
+                return con_str
+            except Exception as ex:
+                print(f"{con_str=}")
+                print(f"{ex}")
+                pass
+    raise LNDNodeNotFound("LND Node not found")
+
 async def output_custom_records(
     creds: grpc.ChannelCredentials,
     macaroon: str,
     custom_record_keys: Set[int] = None,
     add_index=0,
 ):
-    async with grpc.aio.secure_channel("127.0.0.1:10009", creds) as channel:
+
+    con_str = await find_lnd_node(creds=creds, macaroon=macaroon)
+    async with grpc.aio.secure_channel(f"{con_str}:10009", creds) as channel:
         stub = lnrpc.LightningStub(channel)
         request = ln.InvoiceSubscription(add_index=add_index)
         invoice_subscription = stub.SubscribeInvoices(
